@@ -21,3 +21,4 @@ dogface_yolo/
 # Large model weights (권장: GitHub 제외)
 *.pth
 *.pt
+!weights/best.pth
