@@ -1,0 +1,6 @@
+path: C:\Users\USER\Desktop\dog_emotion\dogface_yolo
+train: images/train
+val: images/val
+
+names:
+  0: dog_face

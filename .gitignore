@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.log
+
+# Virtual Environment
+venv/
+.venv/
+
+# Training / YOLO outputs
+runs/
+dataset/
+dataset_face/
+dogface_yolo/
+
+# IDE
+.vscode/
+.idea/
+
+# Large model weights (권장: GitHub 제외)
+*.pth
+*.pt

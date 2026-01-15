@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>우리 강쥐가 무슨말이 하고싶을까</title>
+  <link rel="stylesheet" href="web/style.css" />
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">🐶</div>
+      <div>
+        <h1>우리 강쥐가 무슨말이 하고싶을까</h1>
+        <p class="sub">웹캠으로 강아지 표정을 분석해 감정을 추정해요</p>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- LEFT: Camera -->
+    <section class="card camCard">
+      <div class="cardHeader">
+        <h2>🎥 실시간 카메라</h2>
+        <div class="pill">EfficientNet</div>
+      </div>
+
+      <div class="videoFrame">
+        <video id="video" autoplay playsinline muted></video>
+        <!-- ✅ overlay canvas for YOLO box -->
+        <canvas id="overlay" class="overlay"></canvas>
+
+        <div class="videoHint">카메라 권한을 허용해 주세요 ✨</div>
+      </div>
+
+      <canvas id="canvas" width="224" height="224" class="hidden"></canvas>
+
+      <div class="controls">
+        <button id="startBtn" class="btn primary">시작</button>
+        <button id="stopBtn" class="btn" disabled>중지</button>
+
+        <label class="toggle">
+          <input type="checkbox" id="autoChk" checked />
+          <span>자동 분석</span>
+        </label>
+      </div>
+
+      <div class="tip">
+        <span class="sparkle">💡</span>
+        강아지 얼굴이 화면 중앙에 오도록 맞추면 더 안정적이에요!
+      </div>
+    </section>
+
+    <!-- RIGHT: Result + Guide -->
+    <section class="card resultCard">
+      <div class="cardHeader">
+        <h2>🧠 분석 결과</h2>
+      </div>
+
+      <div class="resultTop">
+        <div class="bigEmoji" id="emotionEmoji">🐾</div>
+        <div class="resultMeta">
+          <div class="row">
+            <span class="label">감정</span>
+            <span class="value" id="emotion">-</span>
+          </div>
+          <div class="row">
+            <span class="label">신뢰도</span>
+            <span class="value" id="conf">0%</span>
+          </div>
+
+          <div id="warn" class="warn hidden">
+            ⚠️ 신뢰도가 낮아요. 참고용으로 봐주세요!
+          </div>
+        </div>
+      </div>
+
+      <div class="guideBox">
+        <div class="guideTitle">🐕‍🦺 행동 가이드</div>
+        <pre id="guideText" class="guideText">-</pre>
+      </div>
+
+      <div class="mini">
+        <div class="miniCard">
+          <div class="miniTitle">📌 사용 팁</div>
+          <ul>
+            <li>조명이 밝을수록 좋아요</li>
+            <li>움직임이 심하면 감정이 튈 수 있어요</li>
+            <li>자동 분석은 1초 간격으로 동작해요</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- FULL: Capture / Log -->
+    <section class="card logCard">
+      <div class="cardHeader">
+        <h2>📸 캡처 & 기록</h2>
+        <div class="pill soft">로컬 저장(localStorage)</div>
+      </div>
+
+      <div class="logGrid">
+        <div class="preview">
+          <img id="previewImg" alt="preview" />
+          <pre id="previewMeta" class="previewMeta">스크린샷을 찍으면 여기에 미리보기가 보여요.</pre>
+
+          <div class="logActions">
+            <button id="shotBtn" class="btn primary">스크린샷 찍기</button>
+            <button id="saveBtn" class="btn" disabled>저장</button>
+          </div>
+        </div>
+
+        <div class="captionBox">
+          <label class="capLabel" for="captionInput">한 줄 기록 📝</label>
+          <textarea id="captionInput" placeholder="예) 산책 가고 싶어서 신난 것 같아!"></textarea>
+          <div class="capHint">저장하면 아래 갤러리에 쌓여요.</div>
+        </div>
+      </div>
+
+      <div class="galleryHeader">
+        <h3>🧸 우리 강쥐 감정 기록</h3>
+        <div class="smallHint">브라우저에만 저장돼요 (PC 바꾸면 사라짐)</div>
+      </div>
+
+      <div id="gallery" class="gallery"></div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Made with ❤️ for dog parents</span>
+  </footer>
+
+<script src="web/app.js"></script>
+</body>
+</html>
