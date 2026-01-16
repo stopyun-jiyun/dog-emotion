@@ -16,7 +16,6 @@ from fastapi.responses import FileResponse
 from ultralytics import YOLO
 
 
-
 # ===============================
 # App
 # ===============================
@@ -30,10 +29,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.get("/")
-def root():
-    return {"status": "ok"}
 
 # ===============================
 # Paths
@@ -53,54 +48,79 @@ app.mount("/web", StaticFiles(directory=str(WEB_DIR)), name="web")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ===============================
-# Load EfficientNet checkpoint
+# Lazy-loaded globals (IMPORTANT for Render)
 # ===============================
-ckpt = torch.load(CKPT_PATH, map_location=DEVICE)
+model = None
+yolo = None
 
-CLASSES = ckpt["classes"]
-MODEL_NAME = ckpt["model_name"]
-IMG_SIZE = ckpt["img_size"]
+ckpt = None
+CLASSES = None
+MODEL_NAME = None
+IMG_SIZE = None
+tfm = None
 
-model = timm.create_model(
-    MODEL_NAME,
-    pretrained=False,
-    num_classes=len(CLASSES),
-)
-model.load_state_dict(ckpt["state_dict"])
-model.to(DEVICE)
-model.eval()
 
-# ✅ transform (tfm) 전역 정의 — NameError 방지
-tfm = transforms.Compose([
-    transforms.Resize((IMG_SIZE, IMG_SIZE)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225]),
-])
+def load_models():
+    """
+    Render(Web Service)에서 가장 흔한 문제(포트 스캔 타임아웃)는
+    앱 import 시점에 무거운 모델 로딩이 들어가서 uvicorn이 포트를 열기 전에 죽는 거야.
+    그래서 필요한 순간(첫 요청)에만 딱 1번 로딩하도록 lazy-load로 바꿔둠.
+    """
+    global model, yolo, ckpt, CLASSES, MODEL_NAME, IMG_SIZE, tfm
 
-# ===============================
-# Load YOLO (once at startup)
-# ===============================
-yolo = YOLO(str(YOLO_PATH))
+    # ---- EfficientNet (timm) ----
+    if model is None:
+        # Render Free 안정성을 위해 CPU 로드 권장 (필요하면 아래 map_location=DEVICE로 바꿔도 됨)
+        ckpt = torch.load(CKPT_PATH, map_location="cpu")
+
+        CLASSES = ckpt["classes"]
+        MODEL_NAME = ckpt["model_name"]
+        IMG_SIZE = ckpt["img_size"]
+
+        model = timm.create_model(
+            MODEL_NAME,
+            pretrained=False,
+            num_classes=len(CLASSES),
+        )
+        model.load_state_dict(ckpt["state_dict"])
+
+        # GPU 사용 가능하면 옮기기 (로컬은 cuda, Render는 보통 cpu)
+        model.to(DEVICE)
+        model.eval()
+
+        tfm = transforms.Compose([
+            transforms.Resize((IMG_SIZE, IMG_SIZE)),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            ),
+        ])
+
+    # ---- YOLO ----
+    if yolo is None:
+        yolo = YOLO(str(YOLO_PATH))
+
 
 # ===============================
 # Routes
 # ===============================
 @app.get("/")
 def root():
+    # 가벼운 상태 확인용: 모델/YOLO를 여기서 로드하지 않음!
     return {
         "status": "ok",
-        "model": MODEL_NAME,
-        "img_size": IMG_SIZE,
-        "classes": CLASSES,
-        "yolo": str(YOLO_PATH.name),
         "device": DEVICE,
+        "has_model_loaded": model is not None,
+        "has_yolo_loaded": yolo is not None,
     }
+
 
 @app.get("/cam")
 def cam_page():
     # index.html 안에서 /web/style.css, /web/app.js로 불러오도록 해야 함
     return FileResponse(str(WEB_DIR / "index.html"))
+
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
@@ -109,6 +129,9 @@ async def predict(file: UploadFile = File(...)):
     1) Image -> YOLO detect face -> crop (largest box)
     2) EfficientNet classify on crop (fallback: full image)
     """
+    # ✅ 첫 요청에서만 모델 로드 (Render 포트 문제 해결)
+    load_models()
+
     img_bytes = await file.read()
     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     W, H = img.size
@@ -159,4 +182,6 @@ async def predict(file: UploadFile = File(...)):
         "probs": {CLASSES[i]: float(prob[i].item()) for i in range(len(CLASSES))},
         "face_detected": face_crop is not None,
         "box_xyxy": best_box,
+        "model": MODEL_NAME,
+        "img_size": IMG_SIZE,
     }
