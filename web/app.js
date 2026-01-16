@@ -1,3 +1,5 @@
+// web/app.js (완성본: 자동예측 폭주/무한대기 방지 + 동시요청 락 + 안정화)
+
 // ===== DOM =====
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -15,7 +17,6 @@ if (!overlay) {
 }
 
 const octx = overlay.getContext('2d');
-
 
 const emotionEl = document.getElementById('emotion');
 const confEl = document.getElementById('conf');
@@ -38,6 +39,12 @@ const galleryEl = document.getElementById('gallery');
 let stream = null;
 let timer = null;
 const CONF_THRESHOLD = 0.7;
+
+// ✅ 핵심 안정화 상태
+let inFlight = false;             // /predict 동시 호출 방지 (폭주/무한대기 방지)
+let autoEnabledByUser = false;    // 사용자가 체크박스를 "직접" 건드리기 전엔 auto 시작 금지
+let consecutiveErrors = 0;        // 연속 에러 횟수 (자동 분석 잠시 멈추기)
+const MAX_CONSEC_ERRORS = 3;
 
 // ===== Emotion stability =====
 let hist = [];
@@ -106,16 +113,13 @@ function drawOverlayBox(data, stable) {
   const w = x2 - x1;
   const h = y2 - y1;
 
-  // label: emotion + confidence
   const conf = typeof data.confidence === 'number' ? Math.round(data.confidence * 100) : null;
   const label = `${stable.toUpperCase()}${conf !== null ? `  ${conf}%` : ''}`;
 
-  // box style (cute pink)
   octx.lineWidth = 6;
   octx.strokeStyle = 'rgba(255, 115, 182, 0.95)';
   octx.strokeRect(x1, y1, w, h);
 
-  // label background
   octx.font = 'bold 22px Arial';
   const padX = 12;
   const boxH = 34;
@@ -130,6 +134,30 @@ function drawOverlayBox(data, stable) {
 
   octx.fillStyle = 'rgba(31, 36, 48, 0.88)';
   octx.fillText(label, lx + padX, ly + 24);
+}
+
+// ===== Helpers =====
+function setServerErrorUI(msg = '서버 오류') {
+  emotionEl.textContent = msg;
+  confEl.textContent = '';
+  warnEl.classList.add('hidden');
+  guideEl.textContent = '-';
+  emojiEl.textContent = '🐾';
+  setTheme('');
+  clearOverlay();
+}
+
+function resetUI() {
+  hist = [];
+  consecutiveErrors = 0;
+
+  emotionEl.textContent = '-';
+  confEl.textContent = '0%';
+  warnEl.classList.add('hidden');
+  guideEl.textContent = '-';
+  emojiEl.textContent = EMOJI['-'];
+  setTheme('');
+  clearOverlay();
 }
 
 // ===== Webcam start/stop =====
@@ -151,24 +179,15 @@ async function startWebcam() {
     stopBtn.disabled = false;
 
     // reset UI state
-    hist = [];
-    emotionEl.textContent = '-';
-    confEl.textContent = '0%';
-    warnEl.classList.add('hidden');
-    guideEl.textContent = '-';
-    emojiEl.textContent = EMOJI['-'];
-    setTheme('');
-    clearOverlay();
+    resetUI();
 
-    if (autoChk?.checked) startAuto();
+    // ✅ 중요: 페이지 로드시 autoChk가 체크되어 있어도 자동 시작 금지
+    // 사용자가 체크박스를 "직접" 눌러(autoEnabledByUser=true)야만 자동 시작
+    if (autoEnabledByUser && autoChk?.checked) startAuto();
+
   } catch (err) {
     console.error('getUserMedia error:', err);
-    emotionEl.textContent = '카메라 오류';
-    confEl.textContent = '0%';
-    warnEl.classList.add('hidden');
-    guideEl.textContent = '-';
-    emojiEl.textContent = EMOJI['-'];
-    clearOverlay();
+    setServerErrorUI('카메라 오류');
     alert(`카메라 오류: ${err.name || err}`);
   }
 }
@@ -183,6 +202,8 @@ function stopWebcam() {
 
   video.srcObject = null;
   hist = [];
+  inFlight = false;
+  consecutiveErrors = 0;
   clearOverlay();
 
   startBtn.disabled = false;
@@ -199,6 +220,7 @@ function stopWebcam() {
 // ===== Auto loop =====
 function startAuto() {
   stopAuto();
+  // ✅ 너무 잦으면 서버 부담 커질 수 있어서 1s 유지 (원하면 1500~2000 권장)
   timer = setInterval(captureAndPredict, 1000);
 }
 
@@ -212,20 +234,38 @@ async function captureAndPredict() {
   if (!stream) return;
   if (!video.videoWidth || !video.videoHeight) return;
 
-  // model input 224x224
-  canvas.width = 224;
-  canvas.height = 224;
-  ctx.drawImage(video, 0, 0, 224, 224);
-
-  const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.9));
-  const form = new FormData();
-  form.append('file', blob, 'frame.jpg');
+  // ✅ 가장 중요: 요청 겹침 방지
+  if (inFlight) return;
+  inFlight = true;
 
   try {
+    // model input 224x224
+    canvas.width = 224;
+    canvas.height = 224;
+    ctx.drawImage(video, 0, 0, 224, 224);
+
+    const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.9));
+    if (!blob) throw new Error('Failed to create image blob');
+
+    const form = new FormData();
+    form.append('file', blob, 'frame.jpg');
+
+    // ✅ fetch (상대경로 OK: Render 도메인에서 그대로 호출)
     const resp = await fetch('/predict', { method: 'POST', body: form });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    if (!resp.ok) {
+      // 서버가 보내는 json 에러가 있으면 보이게
+      let detail = '';
+      try {
+        const j = await resp.json();
+        detail = j?.detail ? ` (${typeof j.detail === 'string' ? j.detail : 'detail'})` : '';
+      } catch {}
+      throw new Error(`HTTP ${resp.status}${detail}`);
+    }
 
     const data = await resp.json();
+
+    consecutiveErrors = 0;
 
     const predicted = data.emotion ?? data.class ?? '-';
     const stable = stableEmotion(predicted);
@@ -247,18 +287,24 @@ async function captureAndPredict() {
     const guide = ACTION_GUIDE[stable] ?? '행동지침을 준비 중입니다.';
     guideEl.textContent = low ? `⚠️ 참고용 결과입니다.\n${guide}` : guide;
 
-    // overlay (box + label)
-    //drawOverlayBox(data, stable);
+    // overlay (box + label) — 원하면 주석 해제
+    // drawOverlayBox(data, stable);
 
   } catch (e) {
     console.error('predict error:', e);
-    emotionEl.textContent = '서버 오류';
-    confEl.textContent = '';
-    warnEl.classList.add('hidden');
-    guideEl.textContent = '-';
-    emojiEl.textContent = '🐾';
-    setTheme('');
-    clearOverlay();
+    consecutiveErrors += 1;
+
+    // UI
+    setServerErrorUI('서버 오류');
+
+    // ✅ 자동 분석 중 연속 에러가 나면 자동 멈춤 (무한 폭주 방지)
+    if (timer && consecutiveErrors >= MAX_CONSEC_ERRORS) {
+      stopAuto();
+      if (autoChk) autoChk.checked = false;
+      guideEl.textContent = '⚠️ 서버 응답이 불안정해서 자동 분석을 잠시 멈췄어요.\n다시 체크해서 재시도해 주세요.';
+    }
+  } finally {
+    inFlight = false;
   }
 }
 
@@ -267,6 +313,9 @@ startBtn?.addEventListener('click', startWebcam);
 stopBtn?.addEventListener('click', stopWebcam);
 
 autoChk?.addEventListener('change', () => {
+  // ✅ 사용자가 직접 토글했을 때만 auto 허용
+  autoEnabledByUser = true;
+
   if (!stream) return;
   autoChk.checked ? startAuto() : stopAuto();
 });
@@ -330,7 +379,6 @@ function renderGallery() {
     dl.textContent = '다운로드';
     dl.onclick = () => downloadWithCaption(p);
 
-
     const del = document.createElement('button');
     del.className = 'smallBtn';
     del.textContent = '삭제';
@@ -384,7 +432,6 @@ function takeScreenshot() {
   saveBtn.disabled = false;
 }
 
-
 function saveScreenshotPost() {
   if (!lastShot) return;
 
@@ -419,50 +466,41 @@ async function downloadWithCaption(post) {
     img.onerror = rej;
   });
 
-  // ✅ "사진을 가리지 않기" 위해 아래에 메모 영역을 추가로 붙임
   const srcW = img.naturalWidth;
   const srcH = img.naturalHeight;
 
   const pad = Math.round(srcW * 0.03);
 
-  // ✅ 폰트 크기: 이전보다 작게
   const titleSize = Math.max(18, Math.round(srcW * 0.028));
   const bodySize  = Math.max(16, Math.round(srcW * 0.024));
 
-  // 메모 영역 높이(너무 크지 않게)
   const footerH = Math.round(srcH * 0.18);
 
   const c = document.createElement('canvas');
   c.width = srcW;
-  c.height = srcH + footerH; // ✅ 아래 영역 추가
+  c.height = srcH + footerH;
   const g = c.getContext('2d');
 
-  // 배경 (아래쪽은 흰색/연한 회색 추천, 패널 색 따로 안 넣는 느낌)
   g.fillStyle = '#ffffff';
   g.fillRect(0, 0, c.width, c.height);
 
-  // 원본 이미지 그대로 위에 붙임 (가려지지 않음!)
   g.drawImage(img, 0, 0, srcW, srcH);
 
-  // ===== 아래 메모 영역 =====
-  const y0 = srcH; // footer 시작 y
+  const y0 = srcH;
 
-  // 아주 은은한 구분선(원치 않으면 지워도 됨)
   g.fillStyle = 'rgba(0,0,0,0.06)';
   g.fillRect(0, y0, c.width, 2);
 
-  // ✅ 텍스트는 "테두리(stroke) + 채움(fill)" 조합으로 가독성 확보
   function strokeFillText(text, x, y, font, fill = 'rgba(20,20,20,0.95)') {
     g.font = font;
-    g.lineWidth = Math.max(4, Math.round(srcW * 0.004)); // 테두리 두께
-    g.strokeStyle = 'rgba(255,255,255,0.95)';            // 흰 테두리
+    g.lineWidth = Math.max(4, Math.round(srcW * 0.004));
+    g.strokeStyle = 'rgba(255,255,255,0.95)';
     g.fillStyle = fill;
 
     g.strokeText(text, x, y);
     g.fillText(text, x, y);
   }
 
-  // 줄바꿈(길면 자동으로 끊기) + 테두리 텍스트
   function drawWrapped(text, x, y, maxWidth, lineHeight, font) {
     g.font = font;
     const words = text.split(' ');
@@ -495,7 +533,6 @@ async function downloadWithCaption(post) {
   y = drawWrapped(title, pad, y, maxW, Math.round(titleSize * 1.25), `700 ${titleSize}px Arial`);
   drawWrapped(caption, pad, y, maxW, Math.round(bodySize * 1.45), `500 ${bodySize}px Arial`);
 
-  // 다운로드
   const outUrl = c.toDataURL('image/jpeg', 0.92);
   const a = document.createElement('a');
   a.href = outUrl;
@@ -503,9 +540,11 @@ async function downloadWithCaption(post) {
   a.click();
 }
 
-
 shotBtn?.addEventListener('click', takeScreenshot);
 saveBtn?.addEventListener('click', saveScreenshotPost);
 
 // initial gallery render
 renderGallery();
+
+// ✅ 선택: 브라우저가 체크 상태를 기억해도 시작 시 자동이 돌지 않게 "시작 전엔" auto를 무력화하고 싶으면 아래 한 줄을 켜도 됨
+// if (autoChk) autoChk.checked = false;
