@@ -46,6 +46,12 @@ let autoEnabledByUser = false;    // 사용자가 체크박스를 "직접" 건�
 let consecutiveErrors = 0;        // 연속 에러 횟수 (자동 분석 잠시 멈추기)
 const MAX_CONSEC_ERRORS = 3;
 
+// ✅ Render/Free 환경 안정화용
+const BASE_INTERVAL_MS = 3000;    // 기본 자동 분석 간격(3초)
+const MAX_INTERVAL_MS  = 12000;   // 너무 느릴 땐 최대 12초까지 늦춤
+const FETCH_TIMEOUT_MS = 12000;   // predict가 12초 넘게 pending이면 abort
+let currentIntervalMs = BASE_INTERVAL_MS;
+
 // ===== Emotion stability =====
 let hist = [];
 const HIST_N = 5;
@@ -150,6 +156,7 @@ function setServerErrorUI(msg = '서버 오류') {
 function resetUI() {
   hist = [];
   consecutiveErrors = 0;
+  currentIntervalMs = BASE_INTERVAL_MS; // ✅ 자동 분석 간격 리셋
 
   emotionEl.textContent = '-';
   confEl.textContent = '0%';
@@ -188,9 +195,6 @@ async function startWebcam() {
     // reset UI state
     resetUI();
 
-    // ❌ (기존) autoEnabledByUser 조건 때문에 startAuto가 안 불리던 문제 해결
-    // if (autoEnabledByUser && autoChk?.checked) startAuto();
-
   } catch (err) {
     console.error('getUserMedia error:', err);
     setServerErrorUI('카메라 오류');
@@ -226,13 +230,22 @@ function stopWebcam() {
 // ===== Auto loop =====
 function startAuto() {
   stopAuto();
-  // ✅ 너무 잦으면 서버 부담 커질 수 있어서 1s 유지 (원하면 1500~2000 권장)
-  timer = setInterval(captureAndPredict, 1000);
+  // ✅ Render/Free 안정화를 위해 기본 3초 + 상황에 따라 늘릴 수 있게 currentIntervalMs 사용
+  timer = setInterval(captureAndPredict, currentIntervalMs);
 }
 
 function stopAuto() {
   if (timer) clearInterval(timer);
   timer = null;
+}
+
+// ✅ 간격을 런타임에 바꾸면 setInterval은 반영이 안 되니까, 필요할 때 재시작
+function restartAutoWithInterval(ms) {
+  currentIntervalMs = ms;
+  if (timer) {
+    clearInterval(timer);
+    timer = setInterval(captureAndPredict, currentIntervalMs);
+  }
 }
 
 // ===== Predict =====
@@ -243,6 +256,12 @@ async function captureAndPredict() {
   // ✅ 가장 중요: 요청 겹침 방지
   if (inFlight) return;
   inFlight = true;
+
+  // ✅ 배포 환경에서 pending이 길어질 때를 대비한 타임아웃
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  const t0 = performance.now();
 
   try {
     // model input 224x224
@@ -257,10 +276,9 @@ async function captureAndPredict() {
     form.append('file', blob, 'frame.jpg');
 
     // ✅ fetch (상대경로 OK: Render 도메인에서 그대로 호출)
-    const resp = await fetch('/predict', { method: 'POST', body: form });
+    const resp = await fetch('/predict', { method: 'POST', body: form, signal: controller.signal });
 
     if (!resp.ok) {
-      // 서버가 보내는 json 에러가 있으면 보이게
       let detail = '';
       try {
         const j = await resp.json();
@@ -296,12 +314,28 @@ async function captureAndPredict() {
     // overlay (box + label) — 원하면 주석 해제
     // drawOverlayBox(data, stable);
 
+    // ✅ 응답이 안정적으로 오면 간격을 기본값으로 서서히 복귀
+    const dt = performance.now() - t0;
+    if (dt < 2000 && currentIntervalMs > BASE_INTERVAL_MS) {
+      restartAutoWithInterval(Math.max(BASE_INTERVAL_MS, currentIntervalMs - 1000));
+    }
+
   } catch (e) {
     console.error('predict error:', e);
     consecutiveErrors += 1;
 
-    // UI
-    setServerErrorUI('서버 오류');
+    // ✅ 타임아웃(Abort)인 경우: 서버가 느리다는 UX 안내 + 간격 늘리기
+    if (e?.name === 'AbortError') {
+      setServerErrorUI('서버 응답 지연');
+      guideEl.textContent = '⏳ 서버가 느려서 잠시 기다리는 중이에요.\n자동 분석 간격을 늘려 안정화할게요.';
+
+      // 간격을 점진적으로 늘려서 Render Free에서 pending 폭주 방지
+      const next = Math.min(MAX_INTERVAL_MS, Math.round(currentIntervalMs * 1.6));
+      if (next !== currentIntervalMs) restartAutoWithInterval(next);
+    } else {
+      // 일반 에러
+      setServerErrorUI('서버 오류');
+    }
 
     // ✅ 자동 분석 중 연속 에러가 나면 자동 멈춤 (무한 폭주 방지)
     if (timer && consecutiveErrors >= MAX_CONSEC_ERRORS) {
@@ -309,7 +343,9 @@ async function captureAndPredict() {
       if (autoChk) autoChk.checked = false;
       guideEl.textContent = '⚠️ 서버 응답이 불안정해서 자동 분석을 잠시 멈췄어요.\n다시 체크해서 재시도해 주세요.';
     }
+
   } finally {
+    clearTimeout(timeoutId);
     inFlight = false;
   }
 }
@@ -328,7 +364,13 @@ autoChk?.addEventListener('change', async () => {
     return;
   }
 
-  autoChk.checked ? startAuto() : stopAuto();
+  // ✅ 켤 때는 간격 리셋해서 시작(이전 백오프가 남아있지 않게)
+  if (autoChk.checked) {
+    restartAutoWithInterval(BASE_INTERVAL_MS);
+    startAuto();
+  } else {
+    stopAuto();
+  }
 });
 
 // =========================
