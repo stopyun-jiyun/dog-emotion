@@ -168,11 +168,18 @@ async function startWebcam() {
     stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
     video.srcObject = stream;
 
+    // ✅ 사용자가 "시작"을 눌렀다면 = 명시적 액션 → 자동 분석 허용
+    autoEnabledByUser = true;
+
     // ensure overlay matches real video size
     video.addEventListener('loadedmetadata', async () => {
       try { await video.play(); } catch {}
       overlay.width = video.videoWidth || 640;
       overlay.height = video.videoHeight || 480;
+
+      // ✅ 핵심: 시작 버튼으로 웹캠을 켰다면,
+      // 체크 상태를 존중해서 자동 분석을 바로 시작
+      if (autoChk?.checked) startAuto();
     }, { once: true });
 
     startBtn.disabled = true;
@@ -181,9 +188,8 @@ async function startWebcam() {
     // reset UI state
     resetUI();
 
-    // ✅ 중요: 페이지 로드시 autoChk가 체크되어 있어도 자동 시작 금지
-    // 사용자가 체크박스를 "직접" 눌러(autoEnabledByUser=true)야만 자동 시작
-    if (autoEnabledByUser && autoChk?.checked) startAuto();
+    // ❌ (기존) autoEnabledByUser 조건 때문에 startAuto가 안 불리던 문제 해결
+    // if (autoEnabledByUser && autoChk?.checked) startAuto();
 
   } catch (err) {
     console.error('getUserMedia error:', err);
@@ -312,11 +318,16 @@ async function captureAndPredict() {
 startBtn?.addEventListener('click', startWebcam);
 stopBtn?.addEventListener('click', stopWebcam);
 
-autoChk?.addEventListener('change', () => {
-  // ✅ 사용자가 직접 토글했을 때만 auto 허용
+// ✅ 체크박스를 누르면(=사용자 명시 액션) 자동 분석 on/off
+autoChk?.addEventListener('change', async () => {
   autoEnabledByUser = true;
 
-  if (!stream) return;
+  // ✅ 체크했는데 아직 웹캠이 꺼져 있으면 웹캠부터 켜기
+  if (!stream) {
+    if (autoChk.checked) await startWebcam();
+    return;
+  }
+
   autoChk.checked ? startAuto() : stopAuto();
 });
 
